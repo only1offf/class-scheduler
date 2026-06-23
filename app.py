@@ -216,33 +216,43 @@ def run_ilp(subjects, n_sections, max_per_time, times, groups=None):
             prob += pulp.lpSum(z[s][t] for s in gsubs) <= g_hi + 1  # 약간의 여유
 
     status = prob.solve(pulp.PULP_CBC_CMD(msg=0))
-    if pulp.LpStatus[prob.status] not in ('Optimal', 'Not Solved'):
-        return None, pulp.LpStatus[prob.status]
-    if pulp.LpStatus[prob.status] == 'Not Solved':
-        # 제약 완화 후 재시도
-        prob2 = pulp.LpProblem("section_time_relaxed", pulp.LpMinimize)
-        z2 = {
-            s: {t: pulp.LpVariable(f"z2_{i}_{t}", 0, n_sections[s], cat='Integer')
-                for t in times}
-            for i, s in enumerate(subjects)
-        }
-        prob2 += 0
-        for s in subjects:
-            prob2 += pulp.lpSum(z2[s][t] for t in times) == n_sections[s]
-            for t in times:
-                prob2 += z2[s][t] <= max_per_time[s]
-        for t in times:
-            col_sum2 = pulp.lpSum(z2[s][t] for s in subjects)
-            prob2 += col_sum2 >= lo
-            prob2 += col_sum2 <= hi
-        status2 = prob2.solve(pulp.PULP_CBC_CMD(msg=0))
-        if pulp.LpStatus[prob2.status] != 'Optimal':
-            return None, pulp.LpStatus[prob2.status]
-        result = {s: {t: int(round(pulp.value(z2[s][t]))) for t in times} for s in subjects}
-        return result, 'Optimal(relaxed)'
 
-    result = {s: {t: int(round(pulp.value(z[s][t]))) for t in times} for s in subjects}
-    return result, 'Optimal'
+    if pulp.LpStatus[prob.status] == 'Optimal':
+        result = {s: {t: int(round(pulp.value(z[s][t]))) for t in times} for s in subjects}
+        return result, 'Optimal'
+
+    # Infeasible / Not Solved 등 → 그룹 분산 제약 제거하고 재시도
+    # (그룹 분산은 목적함수 soft 유도만 남기고 hard 제약은 뺌)
+    prob2 = pulp.LpProblem("section_time_relaxed", pulp.LpMinimize)
+    z2 = {
+        s: {t: pulp.LpVariable(f"z2_{i}_{t}", 0, n_sections[s], cat='Integer')
+            for t in times}
+        for i, s in enumerate(subjects)
+    }
+
+    # 목적함수: 그룹 분산 soft 유도 (페널티)
+    spread = []
+    for g in groups:
+        gsubs = [s for s in g['subjects'] if s in subjects]
+        for t in times:
+            spread.append(pulp.lpSum(z2[s][t] for s in gsubs))
+    prob2 += pulp.lpSum(spread) if spread else 0
+
+    for s in subjects:
+        prob2 += pulp.lpSum(z2[s][t] for t in times) == n_sections[s]
+        for t in times:
+            prob2 += z2[s][t] <= max_per_time[s]
+    for t in times:
+        col2 = pulp.lpSum(z2[s][t] for s in subjects)
+        prob2 += col2 >= lo
+        prob2 += col2 <= hi
+
+    prob2.solve(pulp.PULP_CBC_CMD(msg=0))
+    if pulp.LpStatus[prob2.status] != 'Optimal':
+        return None, pulp.LpStatus[prob2.status]
+
+    result = {s: {t: int(round(pulp.value(z2[s][t]))) for t in times} for s in subjects}
+    return result, 'Optimal(그룹분산완화)'
 
 
 def build_sections(subjects, assignment, times):
@@ -1509,7 +1519,7 @@ with tab2:
             if assignment is None:
                 st.error(f"❌ ILP 실패 (상태: {ilp_status}). 설정을 확인해주세요.")
             else:
-                if 'relaxed' in ilp_status:
+                if 'relaxed' in ilp_status or '완화' in ilp_status:
                     st.warning("⚠️ 그룹 분산 제약을 완화해 풀었습니다.")
 
                 sections = build_sections(subjects, assignment, times)
