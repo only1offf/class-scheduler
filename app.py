@@ -800,6 +800,209 @@ def build_homeroom_excel(hr_result_df, hr_stats_df, id_col, n_classes,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 예시 파일 생성 함수
+# ──────────────────────────────────────────────────────────────────────────────
+
+def make_example_student_csv() -> bytes:
+    """학생 선택과목 CSV 예시"""
+    df = pd.DataFrame({
+        '신학번': ['10101', '10102', '10103', '10104', '10105'],
+        '성별':   ['남',    '여',    '남',    '여',    '남'],
+        '수학Ⅰ':  [1, 0, 1, 0, 1],
+        '수학Ⅱ':  [0, 1, 0, 1, 0],
+        '영어Ⅰ':  [1, 1, 0, 0, 1],
+        '영어Ⅱ':  [0, 0, 1, 1, 0],
+        '음악':   [1, 0, 1, 0, 0],
+        '미술':   [0, 1, 0, 1, 1],
+        '윤리':   [1, 1, 1, 1, 1],
+        '철학':   [0, 0, 0, 0, 0],
+    })
+    return df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+
+
+def make_example_student_excel() -> bytes:
+    """학생 선택과목 Excel 예시"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "학생선택과목"
+
+    H_FILL  = PatternFill("solid", fgColor="2E4699")
+    H_FONT  = Font(bold=True, color="FFFFFF", size=10)
+    H_ALIGN = Alignment(horizontal='center', vertical='center')
+    NOTE_FONT = Font(color="888888", italic=True, size=9)
+
+    # 안내 행
+    ws.cell(1, 1, "※ 신학번·성별 컬럼 + 과목명 컬럼(0/1). 첫 행은 헤더.")
+    ws.cell(1, 1).font = NOTE_FONT
+    ws.merge_cells('A1:J1')
+
+    headers = ['신학번', '성별', '수학Ⅰ', '수학Ⅱ', '영어Ⅰ', '영어Ⅱ', '음악', '미술', '윤리', '철학']
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(2, ci, h)
+        cell.font, cell.fill, cell.alignment = H_FONT, H_FILL, H_ALIGN
+
+    data = [
+        ['10101','남',1,0,1,0,1,0,1,0],
+        ['10102','여',0,1,1,0,0,1,1,0],
+        ['10103','남',1,0,0,1,1,0,1,0],
+        ['10104','여',0,1,0,1,0,1,1,0],
+        ['10105','남',1,0,1,0,0,1,1,0],
+    ]
+    for row in data:
+        ws.append(row)
+
+    for col in ws.columns:
+        w = max((len(str(c.value or '')) for c in col), default=0)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(w+2, 8), 20)
+
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return buf.read()
+
+
+def make_example_settings_csv(subjects: list[str] | None = None) -> bytes:
+    """과목 설정 CSV 예시"""
+    subs = subjects or ['수학Ⅰ', '수학Ⅱ', '영어Ⅰ', '영어Ⅱ', '음악', '미술', '윤리']
+    df = pd.DataFrame({
+        '과목명':            subs,
+        '학급수(총 분반 수)': [3] * len(subs),
+        '교사수(타임당 최대)': [1] * len(subs),
+        '우선순위':          list(range(len(subs), 0, -1)),
+    })
+    return df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+
+
+def make_example_settings_excel(subjects: list[str] | None = None) -> bytes:
+    """과목 설정 Excel 예시"""
+    subs = subjects or ['수학Ⅰ', '수학Ⅱ', '영어Ⅰ', '영어Ⅱ', '음악', '미술', '윤리']
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "과목설정"
+
+    H_FILL  = PatternFill("solid", fgColor="2E4699")
+    H_FONT  = Font(bold=True, color="FFFFFF", size=10)
+    H_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    NOTE_FONT = Font(color="888888", italic=True, size=9)
+
+    ws.cell(1, 1, "※ 과목명·학급수·교사수·우선순위 컬럼. 과목명은 학생CSV와 정확히 일치해야 합니다.")
+    ws.cell(1, 1).font = NOTE_FONT
+    ws.merge_cells('A1:D1')
+
+    headers = ['과목명', '학급수(총 분반 수)', '교사수(타임당 최대)', '우선순위']
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(2, ci, h)
+        cell.font, cell.fill, cell.alignment = H_FONT, H_FILL, H_ALIGN
+    ws.row_dimensions[2].height = 30
+
+    for i, s in enumerate(subs):
+        ws.append([s, 3, 1, len(subs)-i])
+
+    ws.column_dimensions['A'].width = 18
+    ws.column_dimensions['B'].width = 16
+    ws.column_dimensions['C'].width = 16
+    ws.column_dimensions['D'].width = 10
+
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return buf.read()
+
+
+def make_example_groups_csv() -> bytes:
+    """과목 그룹 CSV 예시"""
+    df = pd.DataFrame({
+        '그룹명':               ['교양', '예술', '교과'],
+        '과목목록 (쉼표로 구분)': ['윤리, 철학', '음악, 미술', '수학Ⅰ, 수학Ⅱ, 영어Ⅰ, 영어Ⅱ'],
+        '선택수':               [1, 1, 3],
+    })
+    return df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+
+
+def make_example_groups_excel() -> bytes:
+    """과목 그룹 Excel 예시"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "과목그룹"
+
+    H_FILL  = PatternFill("solid", fgColor="2E4699")
+    H_FONT  = Font(bold=True, color="FFFFFF", size=10)
+    H_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    NOTE_FONT = Font(color="888888", italic=True, size=9)
+
+    ws.cell(1, 1, "※ 그룹명 / 과목목록(쉼표구분) / 선택수. 선택수 합계 = 타임 수.")
+    ws.cell(1, 1).font = NOTE_FONT
+    ws.merge_cells('A1:C1')
+
+    for ci, h in enumerate(['그룹명', '과목목록 (쉼표로 구분)', '선택수'], 1):
+        cell = ws.cell(2, ci, h)
+        cell.font, cell.fill, cell.alignment = H_FONT, H_FILL, H_ALIGN
+    ws.row_dimensions[2].height = 28
+
+    data = [
+        ['교양', '윤리, 철학', 1],
+        ['예술', '음악, 미술', 1],
+        ['교과', '수학Ⅰ, 수학Ⅱ, 영어Ⅰ, 영어Ⅱ', 3],
+    ]
+    for row in data:
+        ws.append(row)
+
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 36
+    ws.column_dimensions['C'].width = 10
+
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return buf.read()
+
+
+def make_example_separation_csv() -> bytes:
+    """분리 조건 CSV 예시"""
+    df = pd.DataFrame({'학번A': ['10101', '10203'], '학번B': ['10205', '10418']})
+    return df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+
+
+def make_example_separation_excel() -> bytes:
+    """분리 조건 Excel 예시"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "분리조건"
+
+    H_FILL  = PatternFill("solid", fgColor="C0392B")
+    H_FONT  = Font(bold=True, color="FFFFFF", size=10)
+    H_ALIGN = Alignment(horizontal='center', vertical='center')
+    NOTE_FONT = Font(color="888888", italic=True, size=9)
+
+    ws.cell(1, 1, "※ 학번A / 학번B 두 열. 이 두 학생은 본반·이동반 모두에서 분리됩니다.")
+    ws.cell(1, 1).font = NOTE_FONT
+    ws.merge_cells('A1:B1')
+
+    for ci, h in enumerate(['학번A', '학번B'], 1):
+        cell = ws.cell(2, ci, h)
+        cell.font, cell.fill, cell.alignment = H_FONT, H_FILL, H_ALIGN
+
+    for row in [['10101', '10205'], ['10203', '10418']]:
+        ws.append(row)
+
+    ws.column_dimensions['A'].width = 14
+    ws.column_dimensions['B'].width = 14
+
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return buf.read()
+
+
+def read_uploaded_file(f, dtype=str) -> pd.DataFrame:
+    """CSV / Excel 모두 읽기"""
+    name = f.name.lower()
+    if name.endswith('.xlsx') or name.endswith('.xls'):
+        return pd.read_excel(f, dtype=dtype)
+    else:
+        for enc in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr']:
+            try:
+                f.seek(0)
+                return pd.read_csv(f, encoding=enc, dtype=dtype)
+            except UnicodeDecodeError:
+                continue
+        f.seek(0)
+        return pd.read_csv(f, dtype=dtype)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Streamlit UI
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -837,17 +1040,32 @@ tab1, tab_grp, tab_sep, tab2, tab3, tab4 = st.tabs([
 # TAB 1: CSV 업로드
 # ════════════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.subheader("학생 선택과목 CSV 업로드")
+    st.subheader("학생 선택과목 파일 업로드")
     st.markdown("""
     **파일 형식:** `신학번`(또는 `학번`) + `성별` + 과목명 컬럼들  
-    과목 선택 여부: `1`(선택) / `0`(미선택) | 성별: `남`/`여` (또는 M/F, 1/2)
+    과목 선택 여부: `1`(선택) / `0`(미선택) | 성별: `남`/`여` (또는 M/F, 1/2)  
+    **지원 형식:** CSV, Excel(.xlsx)
     """)
 
-    uploaded = st.file_uploader("CSV 파일 선택", type=['csv'], label_visibility='collapsed')
+    with st.expander("📥 예시 파일 다운로드"):
+        st.caption("아래 예시 파일을 참고해 업로드 파일을 준비하세요.")
+        ex1, ex2 = st.columns(2)
+        with ex1:
+            st.download_button("📄 예시 CSV", data=make_example_student_csv(),
+                               file_name="학생선택과목_예시.csv", mime="text/csv",
+                               use_container_width=True)
+        with ex2:
+            st.download_button("📊 예시 Excel", data=make_example_student_excel(),
+                               file_name="학생선택과목_예시.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
+
+    uploaded = st.file_uploader("파일 선택 (CSV 또는 Excel)", type=['csv','xlsx','xls'],
+                                label_visibility='collapsed')
 
     if uploaded:
         try:
-            raw_df = pd.read_csv(uploaded, encoding='utf-8-sig', dtype=str)
+            raw_df = read_uploaded_file(uploaded, dtype=str)
             raw_df.columns = raw_df.columns.str.strip()
             for col in raw_df.columns:
                 raw_df[col] = raw_df[col].str.strip()
@@ -930,6 +1148,48 @@ with tab_grp:
             subjects_auto = st.session_state['subjects_auto']
             raw_df        = st.session_state['raw_df']
 
+            # 예시 다운로드
+            with st.expander("📥 예시 파일 다운로드"):
+                ex1, ex2 = st.columns(2)
+                with ex1:
+                    st.download_button("📄 예시 CSV", data=make_example_groups_csv(),
+                                       file_name="과목그룹_예시.csv", mime="text/csv",
+                                       use_container_width=True)
+                with ex2:
+                    st.download_button("📊 예시 Excel", data=make_example_groups_excel(),
+                                       file_name="과목그룹_예시.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                       use_container_width=True)
+
+            # 파일 업로드
+            st.markdown("#### 방법 ① — 파일 업로드 (CSV / Excel)")
+            grp_uploaded = st.file_uploader("과목 그룹 파일 선택", type=['csv','xlsx','xls'],
+                                            key='grp_uploader', label_visibility='collapsed')
+            if grp_uploaded:
+                try:
+                    grp_file_df = read_uploaded_file(grp_uploaded, dtype=str)
+                    grp_file_df.columns = grp_file_df.columns.str.strip()
+                    # 필요한 컬럼만 매핑
+                    col_map = {}
+                    for c in grp_file_df.columns:
+                        cl = c.strip().lower()
+                        if '그룹' in cl or 'group' in cl:
+                            col_map['그룹명'] = c
+                        elif '과목' in cl or 'subject' in cl:
+                            col_map['과목목록 (쉼표로 구분)'] = c
+                        elif '선택' in cl or 'pick' in cl or 'count' in cl or '수' in cl:
+                            col_map['선택수'] = c
+                    if len(col_map) >= 2:
+                        grp_file_df = grp_file_df.rename(columns={v: k for k, v in col_map.items()})
+                        st.session_state['groups_df'] = grp_file_df[list(col_map.keys())].copy()
+                        st.session_state['groups_init'] = True
+                        st.success(f"✅ {len(grp_file_df)}개 그룹 로드됨")
+                    else:
+                        st.error("그룹명·과목목록·선택수 컬럼을 찾지 못했습니다. 예시 파일 형식을 확인해주세요.")
+                except Exception as e:
+                    st.error(f"파일 읽기 오류: {e}")
+
+            st.markdown("#### 방법 ② — 직접 입력")
             # 초기 그룹 테이블
             if not st.session_state.get('groups_init'):
                 st.session_state['groups_df'] = pd.DataFrame({
@@ -1003,17 +1263,39 @@ with tab_sep:
     > 구조적으로 분리 불가능한 경우 위반 내역이 별도로 표시됩니다.
     """)
 
-    st.markdown("#### 방법 ① — CSV 파일 업로드")
+    st.markdown("#### 방법 ① — 파일 업로드 (CSV / Excel)")
+
+    with st.expander("📥 예시 파일 다운로드"):
+        ex1, ex2 = st.columns(2)
+        with ex1:
+            st.download_button("📄 예시 CSV", data=make_example_separation_csv(),
+                               file_name="분리조건_예시.csv", mime="text/csv",
+                               use_container_width=True)
+        with ex2:
+            st.download_button("📊 예시 Excel", data=make_example_separation_excel(),
+                               file_name="분리조건_예시.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
+
     st.markdown("`학번A, 학번B` 두 열 (헤더 유무 자동 감지)")
-    sep_uploaded = st.file_uploader("분리 조건 CSV", type=['csv'], key='sep_uploader', label_visibility='collapsed')
+    sep_uploaded = st.file_uploader("분리 조건 파일 (CSV / Excel)", type=['csv','xlsx','xls'],
+                                    key='sep_uploader', label_visibility='collapsed')
 
     uploaded_pairs: set[frozenset] = set()
     if sep_uploaded:
         try:
-            sep_raw = pd.read_csv(sep_uploaded, encoding='utf-8-sig', dtype=str, header=None)
-            first_row = sep_raw.iloc[0].tolist()
-            if any(str(v).strip().lower() in ['학번a','학번b','a','b','학번','id'] for v in first_row):
-                sep_raw = sep_raw.iloc[1:].reset_index(drop=True)
+            sep_raw = read_uploaded_file(sep_uploaded, dtype=str)
+            sep_raw.columns = [str(c).strip() for c in sep_raw.columns]
+            # 헤더가 학번A/B 형태면 그대로, 아니면 첫 행 검사
+            has_header = any(
+                str(c).strip().lower() in ['학번a','학번b','a','b','학번','id']
+                for c in sep_raw.columns
+            )
+            if not has_header:
+                # 헤더 없는 경우 첫 행이 헤더인지 확인
+                first_row = sep_raw.iloc[0].tolist()
+                if any(str(v).strip().lower() in ['학번a','학번b','a','b','학번','id'] for v in first_row):
+                    sep_raw = sep_raw.iloc[1:].reset_index(drop=True)
             uploaded_pairs = parse_separation_pairs(sep_raw)
             st.success(f"✅ {len(uploaded_pairs)}쌍 로드됨")
             st.dataframe(
@@ -1021,7 +1303,7 @@ with tab_sep:
                 use_container_width=True, hide_index=True, height=180,
             )
         except Exception as e:
-            st.error(f"CSV 읽기 오류: {e}")
+            st.error(f"파일 읽기 오류: {e}")
 
     st.divider()
     st.markdown("#### 방법 ② — 직접 입력")
@@ -1074,6 +1356,62 @@ with tab2:
         use_groups    = st.session_state.get('use_groups', False)
 
         st.subheader("과목별 분반·교사 수 설정")
+
+        # 예시 + 파일 업로드
+        with st.expander("📥 예시 파일 다운로드 / 파일로 불러오기"):
+            st.caption("예시 파일을 받아 수정한 뒤 업로드하면 표가 자동으로 채워집니다.")
+            cur_subs = st.session_state.get('subjects_auto', None)
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button("📄 예시 CSV", data=make_example_settings_csv(cur_subs),
+                                   file_name="과목설정_예시.csv", mime="text/csv",
+                                   use_container_width=True)
+            with dl2:
+                st.download_button("📊 예시 Excel", data=make_example_settings_excel(cur_subs),
+                                   file_name="과목설정_예시.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True)
+
+            settings_file = st.file_uploader(
+                "과목 설정 파일 업로드 (CSV / Excel)",
+                type=['csv','xlsx','xls'], key='settings_uploader',
+                label_visibility='collapsed',
+            )
+            if settings_file:
+                try:
+                    sf = read_uploaded_file(settings_file, dtype=str)
+                    sf.columns = sf.columns.str.strip()
+                    # 컬럼 매핑
+                    rename = {}
+                    for c in sf.columns:
+                        cl = c.lower()
+                        if '과목' in cl and '명' in cl: rename[c] = '과목명'
+                        elif '학급' in cl or '분반' in cl: rename[c] = '학급수(총 분반 수)'
+                        elif '교사' in cl: rename[c] = '교사수(타임당 최대)'
+                        elif '우선' in cl or 'priority' in cl: rename[c] = '우선순위'
+                    sf = sf.rename(columns=rename)
+                    needed = ['과목명', '학급수(총 분반 수)', '교사수(타임당 최대)']
+                    missing = [c for c in needed if c not in sf.columns]
+                    if missing:
+                        st.error(f"필수 컬럼 없음: {missing}. 예시 파일 형식을 확인해주세요.")
+                    else:
+                        for col in ['학급수(총 분반 수)', '교사수(타임당 최대)', '우선순위']:
+                            if col in sf.columns:
+                                sf[col] = pd.to_numeric(sf[col], errors='coerce').fillna(
+                                    1 if '우선' not in col else 0
+                                ).astype(int)
+                        if '우선순위' not in sf.columns:
+                            sf['우선순위'] = 0
+                        if '그룹' not in sf.columns:
+                            sub_to_g = groups_to_subject_map(parsed_groups)
+                            sf['그룹'] = sf['과목명'].apply(
+                                lambda s: sub_to_g.get(str(s).strip(), '(미지정)')
+                            )
+                        st.session_state['settings_df'] = sf[['과목명','학급수(총 분반 수)','교사수(타임당 최대)','그룹','우선순위']]
+                        st.session_state['settings_init'] = True
+                        st.success(f"✅ {len(sf)}개 과목 설정 로드됨")
+                except Exception as e:
+                    st.error(f"파일 읽기 오류: {e}")
 
         # 우선순위 자동 계산 (그룹 사용 시)
         priority_map: dict[str, int] = {}
