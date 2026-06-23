@@ -66,13 +66,31 @@ def get_time_labels(n: int) -> list[str]:
     return [chr(65 + i) for i in range(n)]
 
 
-def abbr(name: str, length: int = 5) -> str:
-    return name[:length]
+OPER_MOVING   = '이동형'      # 전체 분반이 타임 배정
+OPER_FIXED    = '본반고정'    # 전체 분반이 본반 그대로
+OPER_MIXED    = '혼합'        # 일부 본반고정 + 나머지 이동형
+OPER_OPTIONS  = [OPER_MOVING, OPER_FIXED, OPER_MIXED]
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 과목 그룹 유틸
-# ──────────────────────────────────────────────────────────────────────────────
+def parse_oper_type(val: str) -> str:
+    v = str(val).strip()
+    if v in OPER_OPTIONS:
+        return v
+    if '고정' in v or 'fixed' in v.lower():
+        return OPER_FIXED
+    if '혼합' in v or 'mixed' in v.lower() or 'hybrid' in v.lower():
+        return OPER_MIXED
+    return OPER_MOVING
+
+
+def get_moving_sections(subject: str, n_total: int, n_fixed: int) -> tuple[int, int]:
+    """혼합 과목: (이동형 분반 수, 본반고정 분반 수)"""
+    n_fixed  = max(0, min(n_fixed, n_total))
+    n_moving = n_total - n_fixed
+    return n_moving, n_fixed
+
+
+
 
 def validate_groups(groups_df: pd.DataFrame, subjects_auto: list[str]) -> tuple[list[dict], list[str]]:
     """
@@ -163,13 +181,15 @@ def check_separation_violations(
 # ILP — 그룹 내 과목 분산 제약 포함
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_ilp(subjects, n_sections, max_per_time, times, groups=None):
+def run_ilp(subjects, n_sections, max_per_time, times, groups=None, oper_map=None):
     """
-    groups: [{'name':..., 'subjects':[...], 'n_pick':...}]
-    그룹이 있으면: 같은 그룹 과목들이 같은 타임에 몰리지 않도록 제약 추가
-      → 그룹 내 과목별 타임당 배정 분반 수 합계 ≤ floor(그룹총분반/타임수)+1
+    oper_map: {과목: 운영유형}  — 이동형/혼합만 ILP 대상. 본반고정은 제외.
+    n_sections: 이동형 분반 수만 담겨 있어야 함 (호출 전 정제)
     """
-    groups = groups or []
+    groups   = groups or []
+    oper_map = oper_map or {}
+    # 이동형 분반이 1개 이상인 과목만
+    subjects = [s for s in subjects if n_sections.get(s, 0) > 0]
     total  = sum(n_sections[s] for s in subjects)
     nt     = len(times)
     lo, hi = total // nt, (total + nt - 1) // nt
@@ -275,20 +295,26 @@ def assign_students(
     df, id_col, subjects, assignment, sections,
     times, max_per_section,
     homeroom=None, sep_pairs=None,
-    groups=None,           # 그룹 구조
-    priority_map=None,     # {과목: 우선순위점수} — 높을수록 분반 수 우선 배정
+    groups=None,
+    priority_map=None,
+    oper_map=None,       # {과목: 운영유형}
+    fixed_sections=None, # {과목: 본반고정 분반 수}
     seed=42,
 ):
     """
-    그룹 구조가 있을 때:
-      - 학생이 선택한 과목을 그룹별로 분류 → 그룹의 타임 슬롯에 배정
-      - priority_map: 분반 수 배정 시 우선과목을 먼저 배정 (greedy)
-    분리 조건: sep_pairs 쌍은 같은 분반 금지 (페널티 방식)
+    운영유형별 처리:
+    - 이동형: 기존 타임 배정
+    - 본반고정: 시간표에 '본반수업' 표기, 타임 배정 없음
+    - 혼합: 이동형 분반은 타임 배정, 나머지는 '본반수업'
+      → 학생이 이동형 분반에 들어갈지 본반고정 분반에 들어갈지는
+        본반 번호 기반으로 결정 (본반고정 분반 수만큼 본반 번호 낮은 순 배정)
     """
-    homeroom     = homeroom or {}
-    sep_pairs    = sep_pairs or set()
-    groups       = groups or []
-    priority_map = priority_map or {}
+    homeroom      = homeroom or {}
+    sep_pairs     = sep_pairs or set()
+    groups        = groups or []
+    priority_map  = priority_map or {}
+    oper_map      = oper_map or {}
+    fixed_sections= fixed_sections or {}  # {과목: 본반고정 분반 수}
     random.seed(seed)
 
     use_groups = len(groups) > 0
@@ -325,39 +351,84 @@ def assign_students(
     for row in rows:
         sid = str(row.get(id_col, ''))
 
-        # 선택 과목 추출
-        chosen = [s for s in subjects if int(row.get(s, 0)) == 1]
+        # 선택 과목 추출 (전체)
+        chosen_all = [s for s in subjects if int(row.get(s, 0)) == 1]
 
-        # 유효성 검사
+        # 운영유형별 분류
+        # 본반고정 과목 (전체 고정): 이동반 배정 불필요
+        fixed_all  = [s for s in chosen_all if oper_map.get(s) == OPER_FIXED]
+        # 혼합 과목: 학생이 이동형 분반에 들어갈지 본반고정 분반에 들어갈지 결정
+        mixed_subs = [s for s in chosen_all if oper_map.get(s) == OPER_MIXED]
+        # 이동형 과목 (ILP 대상)
+        moving_subs = [s for s in chosen_all if oper_map.get(s, OPER_MOVING) == OPER_MOVING]
+
+        # 혼합 과목 처리: 본반 번호 기반으로 이동/고정 분류
+        # 본반고정 분반 수(fixed_sections[s])만큼 낮은 본반 번호 학생은 본반고정
+        mixed_fixed  = []  # 이 학생에게 본반고정으로 처리할 혼합 과목
+        mixed_moving = []  # 이 학생에게 이동형으로 처리할 혼합 과목
+        for s in mixed_subs:
+            n_fix = fixed_sections.get(s, 0)
+            n_mov = assignment.get(s, {})  # 이동형 분반 있으면 이동형
+            # 본반 번호로 판단: 본반고정 분반 수 이하 번호면 고정
+            hr = homeroom.get(sid, '')
+            try:
+                hr_num = int(''.join(filter(str.isdigit, hr)))
+            except (ValueError, TypeError):
+                hr_num = 999
+            if n_fix > 0 and hr_num <= n_fix:
+                mixed_fixed.append(s)
+            else:
+                mixed_moving.append(s)
+
+        # 이동형 대상 = 순수이동형 + 혼합 중 이동 처리
+        moving_for_assign = moving_subs + mixed_moving
+        # 완전고정 대상 = 본반고정 전체 + 혼합 중 고정 처리
+        all_fixed_for_sid = fixed_all + mixed_fixed
+
+        # 선택 과목 (이동형만) — 유효성 검사 대상
+        chosen = moving_for_assign
+
+        # 유효성 검사 — 이동형 과목 수 기준
+        n_moving_needed = len(times) - len(all_fixed_for_sid)
         if use_groups:
-            if not validate_student_picks(row, groups, subjects):
-                # 그룹별 선택 수 불일치 상세 진단
+            # 그룹 내에서 이동형 과목만 선택 수 검사
+            moving_subjects_set = set(moving_for_assign)
+            if not validate_student_picks(row, groups, list(moving_subjects_set)):
                 bad_groups = []
                 for g in groups:
-                    picked = sum(int(row.get(s, 0)) for s in g['subjects'] if s in subjects)
-                    if picked != g['n_pick']:
-                        bad_groups.append(f"{g['name']}({picked}개선택≠{g['n_pick']}개필요)")
-                failed.append({
-                    'sid': sid,
-                    'reason': '그룹별 선택 수 불일치',
-                    'detail': ', '.join(bad_groups) if bad_groups else '알 수 없음',
-                })
-                continue
+                    g_moving = [s for s in g['subjects'] if oper_map.get(s, OPER_MOVING) != OPER_FIXED]
+                    picked   = sum(int(row.get(s, 0)) for s in g_moving if s in subjects)
+                    expected = g['n_pick'] - sum(1 for s in g['subjects'] if oper_map.get(s) == OPER_FIXED)
+                    if expected > 0 and picked != expected:
+                        bad_groups.append(f"{g['name']}({picked}개선택≠{expected}개필요)")
+                if bad_groups:
+                    failed.append({
+                        'sid': sid,
+                        'reason': '그룹별 선택 수 불일치',
+                        'detail': ', '.join(bad_groups),
+                    })
+                    continue
         else:
-            if len(chosen) != n_sel:
+            if len(chosen) != n_moving_needed and n_moving_needed > 0:
                 failed.append({
                     'sid': sid,
-                    'reason': f'선택 과목 수 불일치',
-                    'detail': f'{len(chosen)}개 선택 (필요: {n_sel}개)',
+                    'reason': '선택 과목 수 불일치',
+                    'detail': f'{len(chosen)}개 선택 (이동형 필요: {n_moving_needed}개)',
                 })
                 continue
 
+        # 이동형 과목이 없으면 바로 본반고정 처리 (final_map = {})
+        if not chosen:
+            final_map = {}
         # 타임 배정: 그룹별로 슬롯 할당
-        if use_groups:
-            # 그룹별 선택 과목 목록
+        elif use_groups:
+            # 그룹별 선택 과목 목록 — 이동형만
             group_chosen: dict[str, list[str]] = {}
             for g in groups:
-                gpicks = [s for s in g['subjects'] if int(row.get(s, 0)) == 1]
+                gpicks = [s for s in g['subjects']
+                          if int(row.get(s, 0)) == 1
+                          and oper_map.get(s, OPER_MOVING) != OPER_FIXED
+                          and s in moving_for_assign]
                 group_chosen[g['name']] = gpicks
 
             # 그룹 순서대로 타임 슬롯 할당 (우선순위 높은 그룹부터)
@@ -457,8 +528,10 @@ def assign_students(
             rec[f'{t}타임_분반'] = ''
 
         sid_sec_map[sid] = {}
-        for s, t in final_map.items():
-            if assignment[s][t] == 0:
+
+        # ① 이동형 과목 — 타임 배정
+        for s, t in (final_map or {}).items():
+            if assignment.get(s, {}).get(t, 0) == 0:
                 continue
 
             def pool_score(k, _s=s, _sid=sid):
@@ -475,6 +548,15 @@ def assign_students(
             sid_sec_map[sid][s] = k
             rec[f'{t}타임_과목'] = s
             rec[f'{t}타임_분반'] = f"{abbr(s)}-{k}반"
+
+        # ② 본반고정 과목 — 빈 타임 슬롯에 '본반수업' 표기
+        fixed_time_pool = [t for t in times if rec[f'{t}타임_과목'] == '']
+        for s in all_fixed_for_sid:
+            if not fixed_time_pool:
+                break
+            t = fixed_time_pool.pop(0)
+            rec[f'{t}타임_과목'] = s
+            rec[f'{t}타임_분반'] = '본반수업'
 
         records.append(rec)
 
@@ -1460,6 +1542,8 @@ with tab2:
         st.markdown("""
         - **학급수**: 해당 과목의 전체 분반 수 (타임 합산)
         - **교사수**: 같은 타임 최대 분반 수
+        - **운영유형**: `이동형` 전체 타임 배정 / `본반고정` 전체 본반 수업 / `혼합` 일부만 이동
+        - **본반고정 분반수**: `혼합` 일 때만 — 본반 수업으로 운영할 분반 수 (나머지가 이동형)
         - **우선순위**: 높을수록 분반 배정 우선 (그룹 내에서만 의미)
         """)
 
@@ -1468,31 +1552,43 @@ with tab2:
                 '과목명':            subjects_auto,
                 '학급수(총 분반 수)': [3] * len(subjects_auto),
                 '교사수(타임당 최대)': [1] * len(subjects_auto),
+                '운영유형':          [OPER_MOVING] * len(subjects_auto),
+                '본반고정_분반수':    [0] * len(subjects_auto),
                 '그룹':              [groups_to_subject_map(parsed_groups).get(s, '(미지정)') for s in subjects_auto],
                 '우선순위':          [priority_map.get(s, 0) for s in subjects_auto],
             }
             st.session_state['settings_df'] = pd.DataFrame(init_data)
             st.session_state['settings_init'] = True
         else:
-            # 그룹·우선순위 컬럼 갱신
             cur = st.session_state['settings_df']
             sub_to_g = groups_to_subject_map(parsed_groups)
             cur['그룹']    = cur['과목명'].apply(lambda s: sub_to_g.get(str(s).strip(), '(미지정)'))
             cur['우선순위'] = cur['과목명'].apply(lambda s: priority_map.get(str(s).strip(), 0))
+            if '운영유형' not in cur.columns:
+                cur['운영유형'] = OPER_MOVING
+            if '본반고정_분반수' not in cur.columns:
+                cur['본반고정_분반수'] = 0
             st.session_state['settings_df'] = cur
 
         edited = st.data_editor(
             st.session_state['settings_df'],
             num_rows='dynamic',
             use_container_width=True,
-            height=min(80 + 35 * len(st.session_state['settings_df']), 600),
+            height=min(80 + 38 * len(st.session_state['settings_df']), 650),
             column_config={
-                '과목명':            st.column_config.TextColumn('과목명', width='large'),
-                '학급수(총 분반 수)': st.column_config.NumberColumn('학급수', min_value=1, max_value=30, step=1),
+                '과목명':            st.column_config.TextColumn('과목명', width='medium'),
+                '학급수(총 분반 수)': st.column_config.NumberColumn('학급수(전체)', min_value=1, max_value=30, step=1),
                 '교사수(타임당 최대)': st.column_config.NumberColumn('교사수', min_value=1, max_value=6, step=1),
-                '그룹':              st.column_config.TextColumn('그룹', width='medium', disabled=True),
-                '우선순위':          st.column_config.NumberColumn('우선순위', min_value=0, max_value=99, step=1,
-                                                                   help="같은 그룹 안에서 높을수록 분반 배정 우선"),
+                '운영유형':          st.column_config.SelectboxColumn(
+                    '운영유형', options=OPER_OPTIONS, width='small',
+                    help="이동형: 전체 타임배정 / 본반고정: 전체 본반수업 / 혼합: 일부만 이동",
+                ),
+                '본반고정_분반수':   st.column_config.NumberColumn(
+                    '본반고정 분반수', min_value=0, max_value=30, step=1, width='small',
+                    help="혼합 운영 시 본반 수업으로 운영할 분반 수 (학급수 - 이 수치 = 이동형 분반 수)",
+                ),
+                '그룹':              st.column_config.TextColumn('그룹', width='small', disabled=True),
+                '우선순위':          st.column_config.NumberColumn('우선순위', min_value=0, max_value=99, step=1),
             },
             key='settings_editor',
         )
@@ -1530,40 +1626,88 @@ with tab2:
 
         if run_btn:
             subjects    = valid['과목명'].str.strip().tolist()
-            n_sections  = dict(zip(valid['과목명'].str.strip(), valid['학급수(총 분반 수)'].astype(int)))
+            n_total_sec = dict(zip(valid['과목명'].str.strip(), valid['학급수(총 분반 수)'].astype(int)))
             mpt         = dict(zip(valid['과목명'].str.strip(), valid['교사수(타임당 최대)'].astype(int)))
             prio_map    = dict(zip(valid['과목명'].str.strip(), valid['우선순위'].fillna(0).astype(int)))
-            id_col      = st.session_state['id_col']
-            sep_pairs   = st.session_state.get('sep_pairs', set())
-            use_g       = st.session_state.get('use_groups', False)
-            p_groups    = st.session_state.get('parsed_groups', []) if use_g else []
+            oper_map_raw= dict(zip(valid['과목명'].str.strip(),
+                                   valid.get('운영유형', pd.Series([OPER_MOVING]*len(valid))).fillna(OPER_MOVING)))
+            oper_map    = {s: parse_oper_type(v) for s, v in oper_map_raw.items()}
+            fixed_sec_raw = dict(zip(valid['과목명'].str.strip(),
+                                     valid.get('본반고정_분반수', pd.Series([0]*len(valid))).fillna(0).astype(int)))
 
-            with st.spinner("① ILP로 분반 타임 배정 중 (그룹 분산 제약 포함)..."):
-                assignment, ilp_status = run_ilp(subjects, n_sections, mpt, times, groups=p_groups)
+            # 이동형 분반 수 계산 (ILP 입력용)
+            n_sections = {}
+            fixed_sections_map = {}
+            for s in subjects:
+                ot  = oper_map.get(s, OPER_MOVING)
+                tot = n_total_sec.get(s, 0)
+                if ot == OPER_FIXED:
+                    n_sections[s]         = 0
+                    fixed_sections_map[s] = tot
+                elif ot == OPER_MIXED:
+                    nf = min(fixed_sec_raw.get(s, 0), tot)
+                    n_sections[s]         = max(0, tot - nf)
+                    fixed_sections_map[s] = nf
+                else:
+                    n_sections[s]         = tot
+                    fixed_sections_map[s] = 0
 
-            if assignment is None:
+            # ILP 대상 과목만 (이동형 분반 수 > 0)
+            moving_subjects = [s for s in subjects if n_sections.get(s, 0) > 0]
+
+            id_col    = st.session_state['id_col']
+            sep_pairs = st.session_state.get('sep_pairs', set())
+            use_g     = st.session_state.get('use_groups', False)
+            p_groups  = st.session_state.get('parsed_groups', []) if use_g else []
+
+            # 운영유형 요약 표시
+            oper_summary = {}
+            for s in subjects:
+                ot = oper_map.get(s, OPER_MOVING)
+                oper_summary.setdefault(ot, []).append(s)
+            for ot, subs in oper_summary.items():
+                icon = {'이동형': '🔄', '본반고정': '🏠', '혼합': '🔀'}.get(ot, '')
+                st.info(f"{icon} **{ot}** 과목: {', '.join(subs)}")
+
+            with st.spinner("① ILP로 이동형 분반 타임 배정 중..."):
+                assignment, ilp_status = run_ilp(
+                    moving_subjects, n_sections, mpt, times, groups=p_groups, oper_map=oper_map
+                )
+                # 본반고정 과목도 assignment에 빈 슬롯으로 추가
+                for s in subjects:
+                    if s not in assignment:
+                        assignment[s] = {t: 0 for t in times}
+
+            if moving_subjects and assignment is None:
                 st.error(f"❌ ILP 실패 (상태: {ilp_status}). 설정을 확인해주세요.")
             else:
-                if 'relaxed' in ilp_status or '완화' in ilp_status:
+                if ilp_status and ('relaxed' in ilp_status or '완화' in ilp_status):
                     st.warning("⚠️ 그룹 분산 제약을 완화해 풀었습니다.")
 
-                sections = build_sections(subjects, assignment, times)
+                sections = build_sections(moving_subjects, assignment, times)
+                # 본반고정 과목은 빈 sections
+                for s in subjects:
+                    if s not in sections:
+                        sections[s] = {t: [] for t in times}
+
                 homeroom = {str(r[id_col]): extract_homeroom(str(r[id_col]))
                             for _, r in raw_df.iterrows()}
 
-                with st.spinner("② 학생 분반 배정 중 (그룹·우선순위·분리 조건 반영)..."):
+                with st.spinner("② 학생 분반 배정 중 (운영유형·그룹·분리 조건 반영)..."):
                     result_df, sec_roster, sec_load, failed = assign_students(
                         raw_df, id_col, subjects, assignment, sections,
                         times, int(max_per_section), homeroom,
                         sep_pairs=sep_pairs, groups=p_groups,
-                        priority_map=prio_map, seed=seed,
+                        priority_map=prio_map,
+                        oper_map=oper_map, fixed_sections=fixed_sections_map,
+                        seed=seed,
                     )
 
                 # 이동반 분리 위반 확인
                 moving_violations = []
-                for s in subjects:
+                for s in moving_subjects:
                     for t in times:
-                        for k in sections[s][t]:
+                        for k in sections.get(s, {}).get(t, []):
                             roster = set(sec_roster.get((s, k), []))
                             for pair in sep_pairs:
                                 pl = list(pair)
@@ -1575,14 +1719,17 @@ with tab2:
                                     })
 
                 st.session_state.update({
-                    'assignment': assignment, 'sections': sections,
-                    'sec_load': sec_load,     'sec_roster': sec_roster,
-                    'result_df': result_df,   'failed': failed,
-                    'subjects': subjects,     'homeroom': homeroom,
-                    'n_total': len(raw_df),   'id_col': id_col,
+                    'assignment': assignment,       'sections': sections,
+                    'sec_load': sec_load,           'sec_roster': sec_roster,
+                    'result_df': result_df,         'failed': failed,
+                    'subjects': subjects,           'homeroom': homeroom,
+                    'n_total': len(raw_df),         'id_col': id_col,
                     'has_result': True,
                     'moving_violations': moving_violations,
                     'active_groups': p_groups,
+                    'oper_map': oper_map,
+                    'fixed_sections_map': fixed_sections_map,
+                    'moving_subjects': moving_subjects,
                     'has_homeroom_result': False,
                 })
 
@@ -1624,11 +1771,23 @@ with tab3:
     id_col        = st.session_state['id_col']
     mv_viol       = st.session_state.get('moving_violations', [])
     active_groups = st.session_state.get('active_groups', [])
+    oper_map      = st.session_state.get('oper_map', {})
+    fixed_sec_map = st.session_state.get('fixed_sections_map', {})
+    moving_subs   = st.session_state.get('moving_subjects', subjects)
     n_ok          = n_total - len(failed)
     n_ov          = sum(1 for v in sec_load.values() if v > max_per_section)
     sub_to_group  = groups_to_subject_map(active_groups)
 
     st.subheader("📊 편성 결과 요약")
+
+    # 운영유형 요약 배지
+    if oper_map:
+        type_badges = []
+        for ot, icon in [('이동형','🔄'), ('본반고정','🏠'), ('혼합','🔀')]:
+            subs_of_type = [s for s in subjects if oper_map.get(s, OPER_MOVING) == ot]
+            if subs_of_type:
+                type_badges.append(f"{icon} **{ot}** {len(subs_of_type)}과목")
+        st.caption("  |  ".join(type_badges))
     m1,m2,m3,m4,m5 = st.columns(5)
     m1.metric("총 학생", f"{n_total}명")
     m2.metric("배정 완료", f"{n_ok}명", f"{100*n_ok/n_total:.1f}%")
@@ -1726,11 +1885,29 @@ with tab3:
             st.caption("그룹 색상 구분: " + " | ".join(f"**{g['name']}**" for g in active_groups))
         rows = []
         for s in subjects:
-            row = {'과목': s, '그룹': sub_to_group.get(s, ''), '총 분반': sum(assignment[s][t] for t in times)}
-            for t in times:
-                cnt  = assignment[s][t]
-                secs = ', '.join(f"{abbr(s)}-{k}반" for k in sections[s][t])
-                row[f'{t}타임'] = f"{cnt}분반 ({secs})" if cnt else "—"
+            ot  = oper_map.get(s, OPER_MOVING)
+            icon = {'이동형':'🔄','본반고정':'🏠','혼합':'🔀'}.get(ot, '')
+            row = {
+                '과목': s, '그룹': sub_to_group.get(s, ''),
+                '운영': f"{icon}{ot}",
+                '총 분반': sum(assignment.get(s, {}).get(t, 0) for t in times),
+            }
+            if ot == OPER_FIXED:
+                for t in times:
+                    row[f'{t}타임'] = '🏠 본반수업'
+            elif ot == OPER_MIXED:
+                nf = fixed_sec_map.get(s, 0)
+                nm = row['총 분반']
+                row['총 분반'] = f"{nm}이동+{nf}본반"
+                for t in times:
+                    cnt  = assignment.get(s, {}).get(t, 0)
+                    secs = ', '.join(f"{abbr(s)}-{k}반" for k in sections.get(s, {}).get(t, []))
+                    row[f'{t}타임'] = f"{cnt}분반 ({secs})" if cnt else "—"
+            else:
+                for t in times:
+                    cnt  = assignment.get(s, {}).get(t, 0)
+                    secs = ', '.join(f"{abbr(s)}-{k}반" for k in sections.get(s, {}).get(t, []))
+                    row[f'{t}타임'] = f"{cnt}분반 ({secs})" if cnt else "—"
             rows.append(row)
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
