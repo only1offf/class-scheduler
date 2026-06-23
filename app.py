@@ -303,7 +303,7 @@ def assign_students(
     sec_load   = {(s, k): 0 for s in subjects for t in times for k in sections[s][t]}
     sec_roster = defaultdict(list)
     records    = []
-    failed     = []
+    failed     = []   # {'sid': ..., 'reason': ..., 'detail': ...}
 
     rows = df.to_dict('records')
     random.shuffle(rows)
@@ -331,11 +331,25 @@ def assign_students(
         # 유효성 검사
         if use_groups:
             if not validate_student_picks(row, groups, subjects):
-                failed.append(sid)
+                # 그룹별 선택 수 불일치 상세 진단
+                bad_groups = []
+                for g in groups:
+                    picked = sum(int(row.get(s, 0)) for s in g['subjects'] if s in subjects)
+                    if picked != g['n_pick']:
+                        bad_groups.append(f"{g['name']}({picked}개선택≠{g['n_pick']}개필요)")
+                failed.append({
+                    'sid': sid,
+                    'reason': '그룹별 선택 수 불일치',
+                    'detail': ', '.join(bad_groups) if bad_groups else '알 수 없음',
+                })
                 continue
         else:
             if len(chosen) != n_sel:
-                failed.append(sid)
+                failed.append({
+                    'sid': sid,
+                    'reason': f'선택 과목 수 불일치',
+                    'detail': f'{len(chosen)}개 선택 (필요: {n_sel}개)',
+                })
                 continue
 
         # 타임 배정: 그룹별로 슬롯 할당
@@ -423,7 +437,18 @@ def assign_students(
             final_map = best_map if best_map is not None else overflow_map
 
         if final_map is None:
-            failed.append(sid)
+            if use_groups:
+                # 어느 그룹/과목에서 타임 배정이 막혔는지 진단
+                bad = []
+                for g in groups:
+                    gpicks = [s for s in g['subjects'] if int(row.get(s, 0)) == 1]
+                    no_time = [s for s in gpicks if not any(assignment[s][t] > 0 for t in times)]
+                    if no_time:
+                        bad.append(f"{g['name']}: {', '.join(no_time)} 배정가능타임없음")
+                detail = '; '.join(bad) if bad else '모든 타임 조합에서 유효한 배정 없음'
+                failed.append({'sid': sid, 'reason': '타임 배정 불가', 'detail': detail})
+            else:
+                failed.append({'sid': sid, 'reason': '타임 배정 불가', 'detail': '유효한 타임 조합 없음'})
             continue
 
         rec = {id_col: sid, '본반': homeroom.get(sid, '')}
@@ -1565,7 +1590,12 @@ with tab2:
                 n_ov = sum(1 for v in sec_load.values() if v > max_per_section)
                 msgs = []
                 if moving_violations: msgs.append(f"분리 위반 {len(moving_violations)}건")
-                if failed:            msgs.append(f"미배정 {len(failed)}명")
+                if failed:
+                    # 원인별 요약
+                    from collections import Counter
+                    rc = Counter(f['reason'] for f in failed)
+                    rc_str = ' / '.join(f"{r} {c}명" for r, c in rc.most_common())
+                    msgs.append(f"미배정 {len(failed)}명 ({rc_str})")
                 if n_ov:              msgs.append(f"초과 분반 {n_ov}개")
 
                 if msgs:
@@ -1611,9 +1641,81 @@ with tab3:
             st.dataframe(pd.DataFrame(mv_viol), use_container_width=True, hide_index=True)
     elif st.session_state.get('sep_pairs'):
         st.success(f"✅ 분리 조건 {len(st.session_state['sep_pairs'])}쌍 모두 충족")
+
+    # ── 미배정 진단 ──────────────────────────────────────────────────────────
     if failed:
-        with st.expander(f"⚠️ 미배정 {len(failed)}명"):
-            st.write(failed)
+        with st.expander(f"⚠️ 미배정 {len(failed)}명 — 클릭하여 원인 확인", expanded=True):
+
+            failed_df = pd.DataFrame([
+                {'학번': f['sid'], '원인': f['reason'], '상세': f['detail']}
+                for f in failed
+            ])
+
+            # 원인별 요약
+            reason_counts = failed_df['원인'].value_counts()
+            st.markdown("#### 원인별 분류")
+            rc1, rc2 = st.columns([1, 2])
+            with rc1:
+                for reason, cnt in reason_counts.items():
+                    color = "#e74c3c" if cnt > 10 else "#e67e22"
+                    st.markdown(
+                        f"<div style='background:{color}15;border-left:4px solid {color};"
+                        f"padding:8px 12px;border-radius:4px;margin-bottom:6px'>"
+                        f"<b>{reason}</b><br><span style='font-size:1.4em;font-weight:bold;color:{color}'>"
+                        f"{cnt}명</span></div>",
+                        unsafe_allow_html=True,
+                    )
+            with rc2:
+                st.bar_chart(reason_counts)
+
+            # 원인별 해결 안내
+            st.markdown("#### 💡 해결 방법")
+            if '그룹별 선택 수 불일치' in reason_counts:
+                n = reason_counts['그룹별 선택 수 불일치']
+                st.error(
+                    f"**그룹별 선택 수 불일치 — {n}명**\n\n"
+                    "학생 CSV에서 그룹별로 정해진 수만큼 과목을 선택하지 않은 학생입니다.\n\n"
+                    "→ **[② 과목 그룹] 탭의 선택수**와 **실제 학생 데이터의 선택 수**가 맞는지 확인하세요.\n\n"
+                    "→ 또는 그룹 설정을 끄고 편성하면 해당 학생도 포함됩니다."
+                )
+            if '선택 과목 수 불일치' in reason_counts:
+                n = reason_counts['선택 과목 수 불일치']
+                st.error(
+                    f"**선택 과목 수 불일치 — {n}명**\n\n"
+                    f"사이드바의 타임 수({n_times})와 학생의 선택 과목 수가 다릅니다.\n\n"
+                    "→ 사이드바 **타임 수**를 학생 데이터에 맞게 조정하거나, CSV 데이터를 수정하세요."
+                )
+            if '타임 배정 불가' in reason_counts:
+                n = reason_counts['타임 배정 불가']
+                st.warning(
+                    f"**타임 배정 불가 — {n}명**\n\n"
+                    "선택한 과목 조합에 유효한 타임 배정이 없습니다. 주로 아래 원인입니다.\n\n"
+                    "→ 해당 과목의 **분반 수(학급수)가 너무 적어** 일부 타임에 분반이 없는 경우\n\n"
+                    "→ **교사수(타임당 최대)**가 너무 낮아 특정 타임에 배정이 막힌 경우\n\n"
+                    "→ [④ 과목 설정] 탭에서 학급수·교사수를 늘려 보세요."
+                )
+
+            # 상세 목록
+            st.markdown("#### 학생별 미배정 상세")
+
+            # 원인 필터
+            filter_reason = st.selectbox(
+                "원인 필터",
+                ["전체"] + list(reason_counts.index),
+                key="failed_filter",
+            )
+            disp_failed = failed_df if filter_reason == "전체" else failed_df[failed_df['원인'] == filter_reason]
+            st.caption(f"{len(disp_failed)}명 표시 중")
+            st.dataframe(disp_failed, use_container_width=True, hide_index=True, height=300)
+
+            # 다운로드
+            failed_csv = disp_failed.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+            st.download_button(
+                "📄 미배정 목록 CSV 다운로드",
+                data=failed_csv,
+                file_name="미배정학생목록.csv",
+                mime="text/csv",
+            )
 
     st.divider()
     rt1, rt2, rt3 = st.tabs(["📋 타임 배정표", "👥 분반별 인원", "📄 학생 시간표"])
